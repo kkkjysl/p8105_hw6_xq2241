@@ -1,0 +1,310 @@
+---
+title: "p8105_hw6_xq2241"
+author: "Xinghao Qiao"
+date: 2024-11-25
+output: github_document
+---
+
+
+
+# Problem 1
+
+
+First,we will download the dataset.
+```{r setup}
+library(rnoaa)
+library(broom)
+library(dplyr)
+library(ggplot2)
+library(rsample)
+library (tidyr)
+library(purrr)
+# download dataset
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+According to the dataset,we can do the boostrap analysis to find the distribution of $\hat{r}^2$ and $ \log(\hat{\beta}_0 \cdot \hat{\beta}_1)$.
+
+```{r}
+# boostrap
+bootstrap_regression <- function(data, indices) {
+  # Resample
+  sample_data <- data[indices, ]
+  
+  # Fit model
+  model <- lm(tmax ~ tmin, data = sample_data)
+  
+  # R-squared and coefficients
+  r_squared <- glance(model)$r.squared
+  coefficients <- coef(model)
+  log_beta <- log(coefficients[1] * coefficients[2])
+  
+  return(c(r_squared = r_squared, log_beta = log_beta))
+}
+
+# bootstrap with 5000 resamples
+set.seed(1) 
+bootstrap_results <- boot::boot(
+  data = weather_df,
+  statistic = bootstrap_regression,
+  R = 5000
+)
+
+# Extract results into a data frame
+bootstrap_df <- as.data.frame(bootstrap_results$t)
+colnames(bootstrap_df) <- c("r_squared", "log_beta")
+
+```
+Then,we will identify the 2.5% and 97.5% quantiles for $\hat{r}^2$ and $ \log(\hat{\beta}_0 \cdot \hat{\beta}_1)$ to construct the 95% CI.
+```{r}
+# 95% CI 
+ci_r_squared <- quantile(bootstrap_df$r_squared, c(0.025, 0.975))
+ci_log_beta <- quantile(bootstrap_df$log_beta, c(0.025, 0.975))
+
+print("95% CI for r-squared:")
+print(ci_r_squared)
+
+print("95% CI for log(beta_0 * beta_1):")
+print(ci_log_beta)
+```
+Finally,we will plot the distribution.
+```{r}
+# R-squared distribution
+ggplot(bootstrap_df, aes(x = r_squared)) +
+  geom_histogram(binwidth=0.0001) +
+  geom_density(color = "skyblue")+
+  geom_vline(xintercept = ci_r_squared, linetype = "dashed", color = "red") +
+  labs(title = "Distribution of R-squared",
+       x = "R-squared",
+       y = "Frequency")
+
+# logbeta distribution
+ggplot(bootstrap_df, aes(x = log_beta)) +
+  geom_histogram(binwidth=0.0001) +
+  geom_density(color = "skyblue")+
+  geom_vline(xintercept = ci_log_beta, linetype = "dashed", color = "red") +
+  labs(title = "Distribution of log(beta_0 * beta_1)",
+       x = "log(beta_0 * beta_1)",
+       y = "Frequency")
+
+```
+From the distribution plots, both $\hat{r}^2$ and $ \log(\hat{\beta}_0 \cdot \hat{\beta}_1)$ follow the normal distribution,and most of the quantities of these two value distribute within the 95% confidence interval for each.
+
+# Problem 2
+For this question,we will import the data first.
+```{r}
+
+# Import raw data
+url <- "https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv"
+homicide_data <- read.csv(url)
+head(homicide_data)
+
+
+```
+Then we add the city_state variable,a binary variable indicating whether the homicide is solved and revise the data.
+```{r}
+homicide_data <- homicide_data |>
+  mutate(
+    city_state = paste(city, state, sep = ", "),
+    resolved = ifelse(disposition == "Closed by arrest", 1, 0)
+  )
+# Rrevise the data
+r_data <- homicide_data |>
+  filter(
+    !(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")),
+    victim_race %in% c("White", "Black")
+  ) |>
+  mutate(victim_age = suppressWarnings(as.numeric(victim_age))) |>
+  filter(!is.na(victim_age))# victim_age is numeric
+```
+Now,we can use the glm function to fit a logistic regression for Baltimore, MD.And the estimate and confidence interval of the adjusted odds ratio for solving homicides comparing male victims to female victims will be shown.
+```{r}
+b_data <- r_data |>
+  filter(city_state == "Baltimore, MD")
+
+# logistic regression
+b_glm <- glm(resolved ~ victim_age + victim_sex + victim_race, 
+                     data = b_data, 
+                     family = "binomial")
+
+# OR and CI for male vs female
+baltimore_results <- tidy(b_glm, exponentiate = T, conf.int = T) %>%
+  filter(term == "victim_sexMale")
+
+baltimore_results
+```
+Now,we will run glm for each of the cities in dataset to repeat the above steps.
+```{r}
+city <- r_data |>
+  group_by(city_state) |>
+  nest() |>
+  mutate(
+    model = map(data, ~ glm(resolved ~ victim_age + victim_sex + victim_race, 
+                            data = ., family = "binomial")),
+    tidy_results = map(model, ~ tidy(.x, exponentiate = T, conf.int = T))
+  ) |>
+  unnest(tidy_results) |>
+  filter(term == "victim_sexMale") |>
+  select(city_state, estimate, conf.low, conf.high)
+
+city
+```
+Now,we create the plot for each city.
+```{r}
+library(ggplot2)
+
+city_results <- city |>
+  arrange(estimate)
+
+# Plot ORs and CIs
+ggplot(city_results, aes(x = reorder(city_state, estimate), y = estimate,color = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") + # ref line
+  scale_color_viridis_c() +
+  labs(
+    title = "Adjusted Odds Ratios by City",
+    x = "City",
+    y = "OR (Male vs Female Victims)"
+  ) +
+  coord_flip() +
+  theme_minimal()
+
+```
+In summary,only Nashville,Fresno,Stockton and Albuguergue have odds ratio(significantly greater than 1), which indicates male victims' homicides are more likely to be resolved than female victims'.Additionally,there are no difference in odds between male and female victims in Richmond,Atlanta and Tulsa.And,the rest of cities' female victims' homicides are more likely to be resolved than male victims'.
+
+
+# Problem 3
+First,we will import the data.
+```{r}
+# Import data
+url <- "https://p8105.com/data/birthweight.csv"
+cbwt_data <- read.csv(url)
+head(cbwt_data)
+
+```
+Now,we will clean the dataset.
+```{r}
+data <- cbwt_data |>
+  mutate(
+    babysex = factor(babysex, labels = c("Male", "Female")),
+    frace = factor(frace),
+    mrace = factor(mrace),
+    malform = factor(malform)
+  )
+
+data <- drop_na(data) # Removes missing data
+```
+With the cleaned data,we can find the distribution of the outcome (birthweight).
+```{r}
+# test normality 
+ggplot(data, aes(x = bwt)) +
+  geom_density(aes(y = after_stat(count)), color = "red", size = 1) + # Density 
+  labs(
+    title = "Density Curve for bwt",
+    x = "Birthweight (grams)",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+```
+Since the outcome is continuous and approximately normal distribution,we could use the linear regression to fit the model.And then we can find the correlation matrix to find the relationship between each variables.
+
+```{r}
+numeric_data <- data %>%
+  select(where(is.numeric)) %>%
+  na.omit() 
+
+cor_matrix <- cor(numeric_data) 
+print(cor_matrix)
+```
+From the matrix,we can choose the significant continuous variable (absolute value of coefficient with bwt approaches to 1) and the categorical variable to fit model.
+```{r}
+model1 <- lm(bwt ~ babysex + bhead + gaweeks + wtgain + blength + fincome  + malform + mheight  + ppwt + frace + mrace, data = data)
+
+# Summarize the model
+summary(model1)
+```
+From the initial model,since 'malform','frace'and 'fincome' are not significant,we remove these variablile from the model.And the new model shold be,
+```{r}
+model2 <- lm(bwt ~ babysex + bhead + gaweeks + wtgain + blength  + mheight  + ppwt  + mrace, data = data)
+
+# Summarize the model
+summary(model2)
+```
+Then,we draw a plot of model residuals against fitted values to test the model2.
+```{r}
+library(modelr)
+
+data <- data |>
+  add_predictions(model2, var = "predicted_bwt") |>
+  add_residuals(model2, var = "residual_bwt")
+
+# Plot residuals vs. fitted values
+ggplot(data, aes(x = predicted_bwt, y = residual_bwt)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Fitted Values", x = "Fitted Values", y = "Residuals") +
+  theme_minimal()
+```
+Since,the residuals for model2 are evenly distributed on both sides of 0 and the p-value for model2 less than 0.05,the model2 is meaningful and we can use this model as our new model.Now,we would compare this model2 to two others (One using length at birth and gestational age as predictors (main effects only),One using head circumference, length, sex, and all interactions (including the three-way interaction) between these).
+```{r}
+# length at birth and gestational age as predictors (main effects only)
+model3 <- lm(bwt ~ blength + gaweeks, data = data)
+summary(model3)
+
+# head circumference, length, sex, and all interactions (including the three-way interaction) between these
+model4 <- lm(bwt ~ bhead * blength * babysex, data = data)
+summary(model4)
+
+```
+Comparing these models,
+```{r}
+
+rmse <- function(model, data) {
+  sqrt(mean((data$bwt - predict(model, data))^2))
+}
+
+# cross-validation
+set.seed(1)
+cv_df <- crossv_mc(data, n = 1000)
+
+# Evaluate models
+cv_r <- cv_df |>
+  mutate(
+    model2_rmse = map_dbl(train, ~ {
+      train_data <- as.data.frame(.x)
+      rmse(lm(bwt ~ babysex + bhead + gaweeks + wtgain + blength + mheight + ppwt + mrace, data = train_data), train_data)
+    }),
+    model3_rmse = map_dbl(train, ~ {
+      train_data <- as.data.frame(.x)
+      rmse(lm(bwt ~ blength + gaweeks, data = train_data), train_data)
+    }),
+    model4_rmse = map_dbl(train, ~ {
+      train_data <- as.data.frame(.x)
+      rmse(lm(bwt ~ bhead * blength * babysex, data = train_data), train_data)
+    })
+  )
+
+# result
+summary <- cv_r |>
+  summarize(
+    model2_mean_rmse = mean(model2_rmse),
+    model3_mean_rmse = mean(model3_rmse),
+    model4_mean_rmse = mean(model4_rmse)
+  )
+
+print(summary)
+
+```
+Since the model2 has the lowest rmse value, the model is the best in these three model.
+
